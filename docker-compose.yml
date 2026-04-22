@@ -1,0 +1,135 @@
+services:
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    hostname: namenode
+    environment:
+      - CLUSTER_NAME=diploma-cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    ports:
+      - "9870:9870"
+      - "8020:8020"
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    hostname: datanode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - SERVICE_PRECONDITION=namenode:9870
+    ports:
+      - "9864:9864"
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    depends_on:
+      - namenode
+
+  spark-master:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    image: diplom-spark-runtime
+    container_name: spark-master
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark/apps:/opt/spark-apps
+      - ./ml-service/models:/opt/models
+
+  spark-worker:
+    image: diplom-spark-runtime
+    container_name: spark-worker
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./spark/apps:/opt/spark-apps
+      - ./ml-service/models:/opt/models
+
+  hive-server:
+    image: apache/hive:4.0.0
+    container_name: hive-server
+    hostname: hive-server
+    environment:
+      - HIVE_CONF_DIR=/opt/hive/conf
+      - HADOOP_CONF_DIR=/opt/hive/conf
+    volumes:
+      - ./hive/conf:/opt/hive/conf
+      - ./hive/create_processed_table.sql:/opt/hive/create_processed_table.sql
+      - ./hive/create_video_tables.sql:/opt/hive/create_video_tables.sql
+      - hive_data:/opt/hive/data
+    entrypoint: ["tail", "-f", "/dev/null"]
+    depends_on:
+      - namenode
+
+  nifi:
+    build:
+      context: ./nifi
+      dockerfile: Dockerfile
+    container_name: nifi
+    hostname: nifi
+    ports:
+      - "8443:8443"
+    environment:
+      - SINGLE_USER_CREDENTIALS_USERNAME=admin
+      - SINGLE_USER_CREDENTIALS_PASSWORD=adminadminadmin
+      - HADOOP_CONF_DIR=/opt/hadoop-config
+      - SPARK_HOME=/opt/spark
+      - JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+      - PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:/opt/spark/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    volumes:
+      - ./nifi/input:/opt/nifi/nifi-current/input
+      - ./hadoop-config:/opt/hadoop-config
+      - ./spark/apps:/opt/spark-apps
+      - ./ml-service/models:/opt/models
+      - ./webapp/results:/opt/web-data/results
+      - nifi_conf:/opt/nifi/nifi-current/conf
+      - nifi_database_repository:/opt/nifi/nifi-current/database_repository
+      - nifi_flowfile_repository:/opt/nifi/nifi-current/flowfile_repository
+      - nifi_content_repository:/opt/nifi/nifi-current/content_repository
+      - nifi_provenance_repository:/opt/nifi/nifi-current/provenance_repository
+      - nifi_state:/opt/nifi/nifi-current/state
+    depends_on:
+      - namenode
+      - spark-master
+
+  streamlit-web:
+    build:
+      context: ./webapp
+      dockerfile: Dockerfile
+    container_name: streamlit-web
+    hostname: streamlit-web
+    ports:
+      - "8501:8501"
+      - "8502:8502"
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - WEB_RESULTS_DIR=/opt/web-data/results
+      - MODEL_SERVER_PORT=8502
+      - MODEL_SERVER_URL=http://localhost:8502
+      - MODEL_DIST_DIR=/opt/3d-model
+    volumes:
+      - ./webapp/results:/opt/web-data/results
+      - ./3D_MODEL/dist:/opt/3d-model:ro
+    depends_on:
+      - nifi
+
+volumes:
+  namenode_data:
+  datanode_data:
+  hive_data:
+  nifi_conf:
+  nifi_database_repository:
+  nifi_flowfile_repository:
+  nifi_content_repository:
+  nifi_provenance_repository:
+  nifi_state:

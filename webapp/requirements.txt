@@ -1,0 +1,6 @@
+streamlit==1.56.0
+matplotlib>=3.8,<3.11
+pandas>=2.2,<2.4
+Pillow>=10,<13
+fpdf2>=2.8,<3
+plotly>=6,<7

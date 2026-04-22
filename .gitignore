@@ -1,0 +1,46 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+
+# Local virtual environments
+.venv/
+.venv_local/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+
+# Local runtime and generated data
+namenode_tmp/
+data/
+webapp/results/
+webapp/.streamlit/
+
+# Python / notebook caches
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Logs and temp files
+*.log
+*.tmp
+tmp/
+temp/
+
+# Backup / export files
+*.bak
+
+# Large/generated media outputs
+dlfkgj_raw/
+dlfkgj_processed/
+Sudno_Doc_15_04_frames/
+Sudno_Doc_15_04_masks/
+Sudno_Doc_15_04_overlays/
+
+# 3D model local build/runtime artifacts
+3D_MODEL/node_modules/
+3D_MODEL/.npm-cache/
+3D_MODEL/Diplom/
+3D_MODEL/public/generated/
