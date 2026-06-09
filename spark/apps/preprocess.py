@@ -12,41 +12,29 @@ import torch
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-from segmentation_model import load_model_from_checkpoint
+from segmentation_model import load_model_from_checkpoint, predict_with_loaded_model
 
 
 RAW_IMAGES_ROOT = "hdfs://namenode:8020/data/raw/images"
 PROCESSED_INDEX_ROOT = "hdfs://namenode:8020/data/processed/file_index"
 WEB_OUTPUT_ROOT = os.environ.get("WEB_OUTPUT_ROOT", "/opt/web-data/results")
-MODEL_PATH = os.environ.get("MODEL_PATH", "/opt/models/best_model.pth")
+MODEL_PATH = os.environ.get("MODEL_PATH", "/opt/models/Model_best.pt")
 OVERLAY_ALPHA = float(os.environ.get("PHOTO_OVERLAY_ALPHA", "0.45"))
 LATEST_BATCH_WINDOW_SEC = int(os.environ.get("PHOTO_BATCH_WINDOW_SEC", "20"))
 
 CLASS_INFO = [
     (0, "Void", (0, 0, 0)),
-    (1, "Ship hull", (0, 0, 255)),
-    (2, "Marine growth", (0, 128, 0)),
-    (3, "Anode", (0, 255, 255)),
-    (4, "Overboard valve", (64, 224, 208)),
-    (5, "Propeller", (128, 0, 128)),
-    (6, "Paint peel", (255, 0, 0)),
-    (7, "Bilge keel", (255, 165, 0)),
-    (8, "Defect", (255, 192, 203)),
-    (9, "Corrosion", (255, 255, 0)),
-    (10, "Sea chest grating", (255, 182, 193)),
+    (1, "Normal", (59, 130, 246)),
+    (2, "Marine growth", (134, 239, 172)),
+    (6, "Paint peel", (252, 165, 165)),
+    (9, "Corrosion", (196, 181, 253)),
 ]
 CLASS_NAME_BY_ID = {class_id: class_name for class_id, class_name, _ in CLASS_INFO}
-WEB_EXCLUDED_CLASS_IDS = {0, 6}
+WEB_EXCLUDED_CLASS_IDS = {0}
 RISK_WEIGHTS = {
-    1: 0.08,
     2: 0.48,
-    3: 0.18,
-    4: 0.42,
-    5: 0.52,
-    7: 0.28,
-    8: 0.78,
+    6: 0.72,
     9: 1.0,
-    10: 0.36,
 }
 
 
@@ -157,7 +145,7 @@ def export_photo_results(df) -> None:
     }
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = load_model_from_checkpoint(MODEL_PATH, device=device, num_classes=len(CLASS_INFO))
+    loaded_model = load_model_from_checkpoint(MODEL_PATH, device=device, num_classes=len(CLASS_INFO))
 
     images = []
     total_visible_pixels = 0
@@ -173,9 +161,8 @@ def export_photo_results(df) -> None:
             continue
 
         started = time.perf_counter()
-        with torch.inference_mode():
-            logits = model(image_to_tensor(image, device))
-            pred_mask = logits.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
+        prediction = predict_with_loaded_model(loaded_model, image_to_tensor(image, device))
+        pred_mask = prediction['pred_mask']
         inference_wall_seconds += time.perf_counter() - started
 
         mask_bgr = build_color_mask(pred_mask)
@@ -192,10 +179,9 @@ def export_photo_results(df) -> None:
         mask_path.write_bytes(mask_bytes)
         overlay_path.write_bytes(overlay_bytes)
 
-        unique_ids, counts = np.unique(pred_mask, return_counts=True)
-        class_counts = {int(class_id): int(count) for class_id, count in zip(unique_ids, counts)}
-        non_void = {class_id: count for class_id, count in class_counts.items() if class_id != 0}
-        dominant_class_id = max(non_void, key=non_void.get) if non_void else 0
+        class_counts = prediction['class_pixel_counts']
+        non_void = {class_id: count for class_id, count in class_counts.items() if class_id != 0 and count > 0}
+        dominant_class_id = int(prediction['dominant_class_id'])
         total_pixels = int(pred_mask.size)
         visible_pixels = 0
         for class_id, count in class_counts.items():
@@ -209,7 +195,7 @@ def export_photo_results(df) -> None:
 
         predicted_class_names = [
             CLASS_NAME_BY_ID[class_id]
-            for class_id in sorted(non_void)
+            for class_id in prediction['predicted_class_ids']
             if class_id not in WEB_EXCLUDED_CLASS_IDS
         ]
 
@@ -226,15 +212,11 @@ def export_photo_results(df) -> None:
                 'dominant_class_name': CLASS_NAME_BY_ID[int(dominant_class_id)],
                 'predicted_class_names': predicted_class_names,
                 'class_pixel_counts': class_counts,
-                'class_pixel_ratios': {
-                    class_id: round(count / total_pixels, 6)
-                    for class_id, count in class_counts.items()
-                },
+                'class_pixel_ratios': prediction['class_pixel_ratios'],
+                'prediction_mode': prediction['prediction_mode'],
+                'classification_scores': prediction['classification_scores'],
                 'risk_score': compute_risk_score(
-                    {
-                        class_id: round(count / total_pixels, 6)
-                        for class_id, count in class_counts.items()
-                    }
+                    prediction['class_pixel_ratios']
                 ),
             }
         )

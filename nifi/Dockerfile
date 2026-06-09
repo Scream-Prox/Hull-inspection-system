@@ -5,7 +5,7 @@ FROM apache/nifi:1.28.1
 USER root
 
 RUN apt-get update && \
-    apt-get install -y openjdk-17-jdk python3 python3-pip && \
+    apt-get install -y openjdk-17-jdk python3 python3-pip ffmpeg && \
     pip3 install --no-cache-dir numpy pandas pyarrow pillow opencv-python-headless torch==2.5.1 torchvision==0.20.1 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

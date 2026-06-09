@@ -1,0 +1,667 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sqlite-inspection"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#16a34a",
+                "value": null
+              },
+              {
+                "color": "#f59e0b",
+                "value": 2
+              },
+              {
+                "color": "#ef4444",
+                "value": 4
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sqlite-inspection"
+          },
+          "queryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT COUNT(*) AS issue_types FROM class_metrics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) AND class_name NOT IN ('Void', 'Normal', 'Ship hull') AND frames_present > 0;",
+          "queryType": "table",
+          "rawQueryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT COUNT(*) AS issue_types FROM class_metrics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) AND class_name NOT IN ('Void', 'Normal', 'Ship hull') AND frames_present > 0;",
+          "refId": "A",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Выявлено типов признаков",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sqlite-inspection"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#60a5fa"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Не выявлен"
+                },
+                "1": {
+                  "text": "Обрастание"
+                },
+                "2": {
+                  "text": "Коррозия"
+                },
+                "3": {
+                  "text": "Отслоение краски"
+                },
+                "4": {
+                  "text": "Норма"
+                }
+              }
+            }
+          ],
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sqlite-inspection"
+          },
+          "queryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT COALESCE(primary_issue_code, 0) AS value FROM latest_run;",
+          "queryType": "table",
+          "rawQueryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT COALESCE(primary_issue_code, 0) AS value FROM latest_run;",
+          "refId": "A",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Основной выявленный признак",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sqlite-inspection"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#22c55e"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "Стабильное"
+                },
+                "2": {
+                  "text": "Требует контроля"
+                },
+                "3": {
+                  "text": "Критическое"
+                }
+              }
+            }
+          ],
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sqlite-inspection"
+          },
+          "queryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT COALESCE(state_code, 1) AS value FROM latest_run;",
+          "queryType": "table",
+          "rawQueryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT COALESCE(state_code, 1) AS value FROM latest_run;",
+          "refId": "A",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Состояние участка",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sqlite-inspection"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#16a34a",
+                "value": null
+              },
+              {
+                "color": "#f59e0b",
+                "value": 0.35
+              },
+              {
+                "color": "#ef4444",
+                "value": 0.7
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sqlite-inspection"
+          },
+          "queryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT risk_score AS value FROM latest_run;",
+          "queryType": "table",
+          "rawQueryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT risk_score AS value FROM latest_run;",
+          "refId": "A",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Рейтинг риска",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sqlite-inspection"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "fillOpacity": 85,
+            "gradientMode": "opacity",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 0,
+        "y": 5
+      },
+      "id": 5,
+      "options": {
+        "barRadius": 0.28,
+        "barWidth": 0.76,
+        "fullHighlight": false,
+        "groupWidth": 0.72,
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sqlite-inspection"
+          },
+          "queryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT class_name_ru AS metric, frames_present AS value FROM class_metrics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) AND class_name NOT IN ('Void', 'Normal', 'Ship hull') ORDER BY frames_present DESC, pixel_share_pct DESC LIMIT 8;",
+          "queryType": "table",
+          "rawQueryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT class_name_ru AS metric, frames_present AS value FROM class_metrics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) AND class_name NOT IN ('Void', 'Normal', 'Ship hull') ORDER BY frames_present DESC, pixel_share_pct DESC LIMIT 8;",
+          "refId": "A",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Частота признаков по кадрам",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sqlite-inspection"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sqlite-inspection"
+          },
+          "queryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT class_name_ru AS 'Признак', frames_present AS 'Кадры', printf('%.2f %%', pixel_share_pct) AS 'Доля зоны' FROM class_metrics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) AND class_name NOT IN ('Void', 'Normal', 'Ship hull') ORDER BY frames_present DESC, pixel_share_pct DESC LIMIT 8;",
+          "queryType": "table",
+          "rawQueryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT class_name_ru AS 'Признак', frames_present AS 'Кадры', printf('%.2f %%', pixel_share_pct) AS 'Доля зоны' FROM class_metrics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) AND class_name NOT IN ('Void', 'Normal', 'Ship hull') ORDER BY frames_present DESC, pixel_share_pct DESC LIMIT 8;",
+          "refId": "A",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Сводка по выявленным признакам",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sqlite-inspection"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-BlPu"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "fillOpacity": 82,
+            "gradientMode": "opacity",
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          },
+          "max": 1,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "id": 7,
+      "options": {
+        "barRadius": 0.22,
+        "barWidth": 0.74,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "orientation": "vertical",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sqlite-inspection"
+          },
+          "queryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT frame_label AS metric, risk_score AS value FROM dynamics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) ORDER BY frame_idx LIMIT 12;",
+          "queryType": "table",
+          "rawQueryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT frame_label AS metric, risk_score AS value FROM dynamics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) ORDER BY frame_idx LIMIT 12;",
+          "refId": "A",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Динамика риска по выбранным кадрам",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sqlite-inspection"
+      },
+      "fieldConfig": {
+    "defaults": {
+      "color": {
+        "mode": "fixed",
+        "fixedColor": "#fca5a5"
+      },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Обрастание"
+            },
+            "properties": [
+              {
+                  "id": "color",
+                  "value": {
+                    "mode": "fixed",
+                    "fixedColor": "#86efac"
+                  }
+                }
+              ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Отслоение краски"
+            },
+            "properties": [
+            {
+                  "id": "color",
+                  "value": {
+                    "mode": "fixed",
+                    "fixedColor": "#fca5a5"
+                  }
+                }
+              ]
+        },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Коррозия"
+            },
+            "properties": [
+              {
+                  "id": "color",
+                  "value": {
+                    "mode": "fixed",
+                    "fixedColor": "#c4b5fd"
+                  }
+                }
+              ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 10,
+        "y": 5
+      },
+      "id": 8,
+      "options": {
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sqlite-inspection"
+          },
+          "queryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT class_name_ru AS metric, pixel_share_pct AS value FROM class_metrics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) AND class_name NOT IN ('Void', 'Normal', 'Ship hull') AND pixel_share_pct > 0 ORDER BY pixel_share_pct DESC LIMIT 8;",
+          "queryType": "table",
+          "rawQueryText": "WITH latest_run AS (SELECT * FROM runs WHERE kind='${kind}' ORDER BY updated_at_epoch DESC LIMIT 1) SELECT class_name_ru AS metric, pixel_share_pct AS value FROM class_metrics WHERE kind='${kind}' AND asset_id=(SELECT asset_id FROM latest_run) AND class_name NOT IN ('Void', 'Normal', 'Ship hull') AND pixel_share_pct > 0 ORDER BY pixel_share_pct DESC LIMIT 8;",
+          "refId": "A",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Структура признаков по зоне",
+      "type": "piechart"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "diplom",
+    "hull",
+    "inspection"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "video",
+          "value": "video"
+        },
+        "hide": 2,
+        "label": "Тип результата",
+        "name": "kind",
+        "options": [
+          {
+            "selected": true,
+            "text": "video",
+            "value": "video"
+          },
+          {
+            "selected": false,
+            "text": "photo",
+            "value": "photo"
+          }
+        ],
+        "query": "video,photo",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {
+    "hidden": true
+  },
+  "timezone": "",
+  "title": "Система инспекции корпуса судна",
+  "uid": "hull-inspection",
+  "version": 10,
+  "weekStart": ""
+}

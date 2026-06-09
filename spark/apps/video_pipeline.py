@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -15,7 +16,11 @@ from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-from segmentation_model import load_model_from_checkpoint
+from segmentation_model import load_model_from_checkpoint, predict_with_loaded_model
+
+
+torch.set_num_threads(int(os.environ.get("TORCH_NUM_THREADS", "2")))
+torch.set_num_interop_threads(1)
 
 
 STAGING_ROOT = "hdfs://namenode:8020/data/staging/frames_raw"
@@ -30,30 +35,19 @@ DEFAULT_WEB_OUTPUT_ROOT = os.environ.get("WEB_OUTPUT_ROOT", "/opt/web-data/resul
 
 CLASS_INFO = [
     (0, "Void", (0, 0, 0)),
-    (1, "Ship hull", (0, 0, 255)),
-    (2, "Marine growth", (0, 128, 0)),
-    (3, "Anode", (0, 255, 255)),
-    (4, "Overboard valve", (64, 224, 208)),
-    (5, "Propeller", (128, 0, 128)),
-    (6, "Paint peel", (255, 0, 0)),
-    (7, "Bilge keel", (255, 165, 0)),
-    (8, "Defect", (255, 192, 203)),
-    (9, "Corrosion", (255, 255, 0)),
-    (10, "Sea chest grating", (255, 182, 193)),
+    (1, "Normal", (59, 130, 246)),
+    (2, "Marine growth", (134, 239, 172)),
+    (6, "Paint peel", (252, 165, 165)),
+    (9, "Corrosion", (196, 181, 253)),
 ]
 CLASS_NAME_BY_ID = {class_id: class_name for class_id, class_name, _ in CLASS_INFO}
 CLASS_COLOR_BY_ID = {class_id: color for class_id, _, color in CLASS_INFO}
-WEB_EXCLUDED_CLASS_IDS = {0, 6}
+WEB_EXCLUDED_CLASS_IDS = {0}
+SIGN_EXCLUDED_CLASS_IDS = {0, 1}
 RISK_WEIGHTS = {
-    1: 0.08,
     2: 0.48,
-    3: 0.18,
-    4: 0.42,
-    5: 0.52,
-    7: 0.28,
-    8: 0.78,
+    6: 0.72,
     9: 1.0,
-    10: 0.36,
 }
 
 
@@ -62,18 +56,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-video", required=True, help="Input video path in HDFS or local FS")
     parser.add_argument("--video-id", default=None, help="Stable video id for HDFS output paths")
     parser.add_argument("--trim-start-sec", type=int, default=106)
-    parser.add_argument("--extract-every-n-frames", type=int, default=10)
-    parser.add_argument("--max-frames", type=int, default=None)
-    parser.add_argument("--min-laplacian-var", type=float, default=50.0)
-    parser.add_argument("--min-brightness", type=float, default=25.0)
-    parser.add_argument("--max-brightness", type=float, default=245.0)
-    parser.add_argument("--hamming-threshold", type=int, default=4)
+    parser.add_argument("--extract-every-n-frames", type=int, default=12)
+    parser.add_argument("--max-frames", type=int, default=960)
+    parser.add_argument("--target-analysis-frames", type=int, default=64)
+    parser.add_argument("--coverage-buckets", type=int, default=24)
+    parser.add_argument("--frames-per-bucket", type=int, default=3)
+    parser.add_argument("--min-laplacian-var", type=float, default=18.0)
+    parser.add_argument("--min-brightness", type=float, default=12.0)
+    parser.add_argument("--max-brightness", type=float, default=250.0)
+    parser.add_argument("--hamming-threshold", type=int, default=1)
     parser.add_argument("--crop", default="0.05,0.10,0.95,0.90")
-    parser.add_argument("--target-width", type=int, default=640)
-    parser.add_argument("--target-height", type=int, default=640)
-    parser.add_argument("--model-path", default="/opt/models/best_model.pth")
+    parser.add_argument("--target-width", type=int, default=256)
+    parser.add_argument("--target-height", type=int, default=256)
+    parser.add_argument("--model-path", default="/opt/models/Model_best.pt")
     parser.add_argument("--overlay-alpha", type=float, default=0.45)
     parser.add_argument("--web-output-root", default=DEFAULT_WEB_OUTPUT_ROOT)
+    parser.add_argument("--write-curated", action="store_true", help="Write optional Spark parquet audit tables to HDFS")
     return parser.parse_args()
 
 
@@ -143,7 +141,7 @@ def load_video_to_local(spark: SparkSession, input_video: str, local_path: Path)
     return local_path.stat().st_size
 
 
-def trim_video(input_path: Path, output_path: Path, start_sec: int) -> dict:
+def probe_video(input_path: Path) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open input video: {input_path}")
@@ -152,25 +150,6 @@ def trim_video(input_path: Path, output_path: Path, start_sec: int) -> dict:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    start_frame = int(round(start_sec * fps)) if fps else 0
-    start_frame = min(start_frame, max(total_frames - 1, 0))
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps if fps > 0 else 30.0, (width, height))
-    if not writer.isOpened():
-        raise RuntimeError(f"Could not create output video: {output_path}")
-
-    written_frames = 0
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        writer.write(frame)
-        written_frames += 1
-
-    writer.release()
     cap.release()
 
     return {
@@ -178,59 +157,99 @@ def trim_video(input_path: Path, output_path: Path, start_sec: int) -> dict:
         "width": width,
         "height": height,
         "source_total_frames": total_frames,
-        "start_sec": start_sec,
-        "start_frame": start_frame,
-        "trimmed_frames": written_frames,
+        "duration_sec": float(total_frames / fps) if fps > 0 else 0.0,
     }
 
 
-def extract_frames_to_hdfs(
-    spark: SparkSession,
-    video_path: Path,
-    output_root: str,
+def extract_frames_with_ffmpeg(
+    input_path: Path,
+    output_dir: Path,
+    start_sec: int,
     fps: float,
     every_n_frames: int,
     max_frames: Optional[int],
+    crop: tuple[float, float, float, float],
+    target_w: int,
+    target_h: int,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_file in output_dir.glob("frame_*.jpg"):
+        stale_file.unlink()
+
+    effective_fps = fps if fps and fps > 0 else 25.0
+    sample_fps = max(effective_fps / max(every_n_frames, 1), 0.2)
+    x1r, y1r, x2r, y2r = crop
+    crop_w = max(x2r - x1r, 0.01)
+    crop_h = max(y2r - y1r, 0.01)
+    vf = (
+        f"fps={sample_fps:.6f},"
+        f"crop=iw*{crop_w:.6f}:ih*{crop_h:.6f}:iw*{x1r:.6f}:ih*{y1r:.6f},"
+        f"scale={target_w}:{target_h}:flags=lanczos"
+    )
+
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        str(start_sec),
+        "-i",
+        str(input_path),
+        "-vf",
+        vf,
+        "-q:v",
+        "2",
+    ]
+    if max_frames is not None:
+        command.extend(["-frames:v", str(max_frames)])
+    command.append(str(output_dir / "frame_%08d.jpg"))
+
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else "Unknown ffmpeg error"
+        raise RuntimeError(f"ffmpeg frame extraction failed: {stderr}") from exc
+
+    frame_paths = sorted(output_dir.glob("frame_*.jpg"))
+    if not frame_paths:
+        raise RuntimeError("ffmpeg did not produce any frames for the selected video segment")
+    return frame_paths
+
+
+def build_extracted_frame_rows(
+    local_frame_paths: list[Path],
+    output_root: str,
+    video_id: str,
+    fps: float,
+    every_n_frames: int,
 ) -> list[dict]:
+    rows: list[dict] = []
+    for ordinal, local_path in enumerate(local_frame_paths):
+        frame_idx = ordinal * max(every_n_frames, 1)
+        frame_hdfs_path = f"{output_root}/{local_path.name}"
+        rows.append(
+            {
+                "video_id": video_id,
+                "frame_idx": int(frame_idx),
+                "timestamp_sec": float(frame_idx / fps) if fps else None,
+                "raw_frame_path": frame_hdfs_path,
+            }
+        )
+    return rows
+
+
+def upload_selected_staging_frames(spark: SparkSession, processed_rows: list[dict], output_root: str) -> None:
     delete_hdfs_path(spark, output_root)
     ensure_hdfs_dir(spark, output_root)
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open video for frame extraction: {video_path}")
-
-    rows: list[dict] = []
-    frame_idx = 0
-    saved_count = 0
-
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-
-        if frame_idx % every_n_frames == 0:
-            filename = f"frame_{frame_idx:08d}.jpg"
-            ok_encode, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-            if not ok_encode:
-                raise RuntimeError(f"Could not encode frame {frame_idx}")
-            frame_hdfs_path = f"{output_root}/{filename}"
-            write_hdfs_bytes(spark, frame_hdfs_path, encoded.tobytes())
-            rows.append(
-                {
-                    "video_id": output_root.rstrip("/").split("/")[-1],
-                    "frame_idx": int(frame_idx),
-                    "timestamp_sec": float(frame_idx / fps) if fps else None,
-                    "raw_frame_path": frame_hdfs_path,
-                }
-            )
-            saved_count += 1
-            if max_frames is not None and saved_count >= max_frames:
-                break
-
-        frame_idx += 1
-
-    cap.release()
-    return rows
+    written_paths: set[str] = set()
+    for row in processed_rows:
+        raw_frame_path = str(row["raw_frame_path"])
+        if raw_frame_path in written_paths:
+            continue
+        write_hdfs_bytes(spark, raw_frame_path, bytes(row["processed_content"]))
+        written_paths.add(raw_frame_path)
 
 
 def compute_dhash(image: np.ndarray) -> str:
@@ -254,6 +273,334 @@ def decode_image(content: bytes) -> Optional[np.ndarray]:
     if array.size == 0:
         return None
     return cv2.imdecode(array, cv2.IMREAD_COLOR)
+
+
+def build_processed_frame_record(
+    image: np.ndarray,
+    image_bytes: bytes,
+    raw_frame_path: str,
+    processed_frame_path: str,
+    video_id: str,
+    source_video: str,
+    fps: float,
+    frame_idx: int,
+    timestamp_sec: Optional[float],
+    width: int,
+    height: int,
+    brightness: float,
+    laplacian_var: float,
+    dhash: str,
+    quality_ok: bool,
+    prev_dhash: Optional[str],
+    hamming_to_prev: Optional[int],
+    is_duplicate: bool,
+    crop_px: tuple[int, int, int, int],
+) -> dict:
+    normalized = image.astype(np.float32) / 255.0
+    x1, y1, x2, y2 = crop_px
+    return {
+        "video_id": video_id,
+        "source_video": source_video,
+        "fps": fps,
+        "raw_frame_path": raw_frame_path,
+        "frame_idx": frame_idx,
+        "timestamp_sec": timestamp_sec,
+        "width": width,
+        "height": height,
+        "brightness": brightness,
+        "laplacian_var": laplacian_var,
+        "dhash": dhash,
+        "quality_ok": quality_ok,
+        "prev_dhash": prev_dhash,
+        "hamming_to_prev": hamming_to_prev,
+        "is_duplicate": is_duplicate,
+        "processed_frame_path": processed_frame_path,
+        "processed_content": image_bytes,
+        "crop_x1": x1,
+        "crop_y1": y1,
+        "crop_x2": x2,
+        "crop_y2": y2,
+        "processed_width": int(image.shape[1]),
+        "processed_height": int(image.shape[0]),
+        "norm_min": float(normalized.min()),
+        "norm_max": float(normalized.max()),
+        "norm_mean": float(normalized.mean()),
+        "status": "ok",
+        "error": None,
+    }
+
+
+def frame_quality_score(row: dict) -> float:
+    brightness = float(row.get("brightness") or 0.0)
+    laplacian = float(row.get("laplacian_var") or 0.0)
+    brightness_balance = max(0.0, 1.0 - abs(brightness - 118.0) / 118.0)
+    return laplacian * 0.72 + brightness_balance * 100.0
+
+
+def visual_distance(left: dict, right: dict) -> int:
+    left_hash = str(left.get("dhash") or "")
+    right_hash = str(right.get("dhash") or "")
+    if not left_hash or not right_hash:
+        return 64
+    distance = hamming_distance(left_hash, right_hash)
+    return int(distance) if distance is not None else 64
+
+
+def is_scene_diverse(candidate: dict, existing_rows: list[dict], min_distance: int = 8) -> bool:
+    if not existing_rows:
+        return True
+    return all(visual_distance(candidate, existing) >= min_distance for existing in existing_rows)
+
+
+def select_representative_frames(
+    processed_rows: list[dict],
+    target_frames: int,
+    coverage_buckets: int,
+    frames_per_bucket: int,
+) -> list[dict]:
+    if len(processed_rows) <= max(target_frames, 1):
+        return sorted(processed_rows, key=lambda row: row["frame_idx"])
+
+    ordered_rows = sorted(processed_rows, key=lambda row: row["frame_idx"])
+    total = len(ordered_rows)
+    buckets = max(1, min(coverage_buckets, total))
+    bucket_choices: list[list[dict]] = []
+
+    for bucket_idx in range(buckets):
+        start = int(bucket_idx * total / buckets)
+        end = int((bucket_idx + 1) * total / buckets)
+        bucket_rows = ordered_rows[start:end]
+        if not bucket_rows:
+            continue
+
+        ranked = sorted(
+            bucket_rows,
+            key=lambda row: (frame_quality_score(row), row["frame_idx"]),
+            reverse=True,
+        )
+        local_choices: list[dict] = []
+        for candidate in ranked:
+            if any(abs(candidate["frame_idx"] - existing["frame_idx"]) < 6 for existing in local_choices):
+                continue
+            if not is_scene_diverse(candidate, local_choices, min_distance=8):
+                continue
+            local_choices.append(candidate)
+            if len(local_choices) >= frames_per_bucket:
+                break
+        if len(local_choices) < frames_per_bucket:
+            local_indices = {row["frame_idx"] for row in local_choices}
+            for candidate in ranked:
+                if candidate["frame_idx"] in local_indices:
+                    continue
+                if any(abs(candidate["frame_idx"] - existing["frame_idx"]) < 6 for existing in local_choices):
+                    continue
+                local_choices.append(candidate)
+                local_indices.add(candidate["frame_idx"])
+                if len(local_choices) >= frames_per_bucket:
+                    break
+        bucket_choices.append(local_choices or ranked[:1])
+
+    selected: list[dict] = []
+    selected_indices: set[int] = set()
+    max_bucket_depth = max((len(items) for items in bucket_choices), default=0)
+    for depth in range(max_bucket_depth):
+        for choices in bucket_choices:
+            if depth >= len(choices):
+                continue
+            candidate = choices[depth]
+            if candidate["frame_idx"] in selected_indices:
+                continue
+            if not is_scene_diverse(candidate, selected, min_distance=6) and len(selected) >= buckets:
+                continue
+            selected.append(candidate)
+            selected_indices.add(candidate["frame_idx"])
+            if len(selected) >= target_frames:
+                return sorted(selected, key=lambda row: row["frame_idx"])
+
+    if len(selected) < target_frames:
+        remaining = [row for row in ordered_rows if row["frame_idx"] not in selected_indices]
+        remaining = sorted(remaining, key=lambda row: (frame_quality_score(row), -row["frame_idx"]), reverse=True)
+        for candidate in remaining:
+            selected.append(candidate)
+            selected_indices.add(candidate["frame_idx"])
+            if len(selected) >= target_frames:
+                break
+
+    return sorted(selected, key=lambda row: row["frame_idx"])
+
+
+def prepare_frames_locally(
+    local_frame_paths: list[Path],
+    extracted_rows: list[dict],
+    processed_frames_root: str,
+    video_id: str,
+    source_video: str,
+    fps: float,
+    min_laplacian_var: float,
+    min_brightness: float,
+    max_brightness: float,
+    hamming_threshold: int,
+    crop_px: tuple[int, int, int, int],
+    target_analysis_frames: int,
+    coverage_buckets: int,
+    frames_per_bucket: int,
+) -> tuple[list[dict], dict]:
+    extracted_by_name = {Path(row["raw_frame_path"]).name: row for row in extracted_rows}
+    metrics_rows: list[dict] = []
+    processed_rows: list[dict] = []
+    quality_ok_frames = 0
+    deduplicated_frames = 0
+    prev_quality_dhash: Optional[str] = None
+
+    for local_path in local_frame_paths:
+        payload = local_path.read_bytes()
+        image = decode_image(payload)
+        if image is None:
+            continue
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        brightness = float(np.mean(gray))
+        laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        dhash = compute_dhash(image)
+        width = int(image.shape[1])
+        height = int(image.shape[0])
+
+        extracted = extracted_by_name[local_path.name]
+        quality_ok = (
+            min_brightness <= brightness <= max_brightness
+            and laplacian_var >= min_laplacian_var
+            and bool(dhash)
+        )
+        prev_quality_dhash_for_row = prev_quality_dhash
+        hamming_to_prev = hamming_distance(dhash, prev_quality_dhash_for_row) if prev_quality_dhash_for_row else None
+        is_duplicate = bool(prev_quality_dhash_for_row is not None and hamming_to_prev is not None and hamming_to_prev <= hamming_threshold)
+        if quality_ok:
+            quality_ok_frames += 1
+            prev_quality_dhash = dhash
+
+        metrics_row = {
+            "image": image,
+            "payload": payload,
+            "raw_frame_path": extracted["raw_frame_path"],
+            "frame_idx": int(extracted["frame_idx"]),
+            "timestamp_sec": extracted.get("timestamp_sec"),
+            "brightness": brightness,
+            "laplacian_var": laplacian_var,
+            "dhash": dhash,
+            "width": width,
+            "height": height,
+            "quality_ok": quality_ok,
+            "hamming_to_prev": hamming_to_prev,
+            "is_duplicate": is_duplicate,
+            "prev_dhash": prev_quality_dhash_for_row if quality_ok else None,
+        }
+        metrics_rows.append(metrics_row)
+
+        if quality_ok and not is_duplicate:
+            deduplicated_frames += 1
+            processed_rows.append(
+                build_processed_frame_record(
+                    image=image,
+                    image_bytes=payload,
+                    raw_frame_path=extracted["raw_frame_path"],
+                    processed_frame_path=f"{processed_frames_root}/{local_path.name}",
+                    video_id=video_id,
+                    source_video=source_video,
+                    fps=fps,
+                    frame_idx=int(extracted["frame_idx"]),
+                    timestamp_sec=extracted.get("timestamp_sec"),
+                    width=width,
+                    height=height,
+                    brightness=brightness,
+                    laplacian_var=laplacian_var,
+                    dhash=dhash,
+                    quality_ok=quality_ok,
+                    prev_dhash=prev_quality_dhash_for_row,
+                    hamming_to_prev=hamming_to_prev,
+                    is_duplicate=is_duplicate,
+                    crop_px=crop_px,
+                )
+            )
+
+    fallback_mode = "normal"
+    if not processed_rows:
+        fallback_mode = "raw_extracted"
+        fallback_candidates = [row for row in metrics_rows if row["dhash"]][: min(max(len(metrics_rows), 1), 36)]
+        for row in fallback_candidates:
+            processed_rows.append(
+                build_processed_frame_record(
+                    image=row["image"],
+                    image_bytes=row["payload"],
+                    raw_frame_path=row["raw_frame_path"],
+                    processed_frame_path=f"{processed_frames_root}/{Path(row['raw_frame_path']).name}",
+                    video_id=video_id,
+                    source_video=source_video,
+                    fps=fps,
+                    frame_idx=row["frame_idx"],
+                    timestamp_sec=row["timestamp_sec"],
+                    width=row["width"],
+                    height=row["height"],
+                    brightness=row["brightness"],
+                    laplacian_var=row["laplacian_var"],
+                    dhash=row["dhash"],
+                    quality_ok=True,
+                    prev_dhash=None,
+                    hamming_to_prev=None,
+                    is_duplicate=False,
+                    crop_px=crop_px,
+                )
+            )
+
+    candidate_processed_frames = len(processed_rows)
+    processed_rows = select_representative_frames(
+        processed_rows,
+        target_frames=max(target_analysis_frames, 1),
+        coverage_buckets=max(coverage_buckets, 1),
+        frames_per_bucket=max(frames_per_bucket, 1),
+    )
+
+    summary = {
+        "quality_ok_frames": quality_ok_frames,
+        "deduplicated_frames": deduplicated_frames,
+        "candidate_processed_frames": candidate_processed_frames,
+        "processed_frames": len(processed_rows),
+        "fallback_mode": fallback_mode,
+    }
+    return processed_rows, summary
+
+
+def processed_frame_schema() -> T.StructType:
+    return T.StructType(
+        [
+            T.StructField("video_id", T.StringType(), False),
+            T.StructField("source_video", T.StringType(), False),
+            T.StructField("fps", T.DoubleType(), True),
+            T.StructField("raw_frame_path", T.StringType(), False),
+            T.StructField("frame_idx", T.IntegerType(), False),
+            T.StructField("timestamp_sec", T.DoubleType(), True),
+            T.StructField("width", T.IntegerType(), True),
+            T.StructField("height", T.IntegerType(), True),
+            T.StructField("brightness", T.DoubleType(), True),
+            T.StructField("laplacian_var", T.DoubleType(), True),
+            T.StructField("dhash", T.StringType(), True),
+            T.StructField("quality_ok", T.BooleanType(), True),
+            T.StructField("prev_dhash", T.StringType(), True),
+            T.StructField("hamming_to_prev", T.IntegerType(), True),
+            T.StructField("is_duplicate", T.BooleanType(), True),
+            T.StructField("processed_frame_path", T.StringType(), False),
+            T.StructField("crop_x1", T.IntegerType(), True),
+            T.StructField("crop_y1", T.IntegerType(), True),
+            T.StructField("crop_x2", T.IntegerType(), True),
+            T.StructField("crop_y2", T.IntegerType(), True),
+            T.StructField("processed_width", T.IntegerType(), True),
+            T.StructField("processed_height", T.IntegerType(), True),
+            T.StructField("norm_min", T.DoubleType(), True),
+            T.StructField("norm_max", T.DoubleType(), True),
+            T.StructField("norm_mean", T.DoubleType(), True),
+            T.StructField("status", T.StringType(), True),
+            T.StructField("error", T.StringType(), True),
+        ]
+    )
 
 
 def metrics_udf():
@@ -511,6 +858,58 @@ def prepare_web_output_dirs(web_output_root: str, video_id: str) -> dict[str, Pa
     }
 
 
+def select_story_frames(
+    frame_summaries: list[dict],
+    target_frames: int = 4,
+    coverage_buckets: int = 4,
+) -> list[dict]:
+    if len(frame_summaries) <= target_frames:
+        return sorted(frame_summaries, key=lambda frame: frame["frame_idx"])
+
+    ordered = sorted(frame_summaries, key=lambda frame: frame["frame_idx"])
+    total = len(ordered)
+    buckets = max(1, min(coverage_buckets, total))
+    selected: list[dict] = []
+    selected_keys: set[int] = set()
+
+    for bucket_idx in range(buckets):
+        start = int(bucket_idx * total / buckets)
+        end = int((bucket_idx + 1) * total / buckets)
+        bucket_frames = ordered[start:end]
+        if not bucket_frames:
+            continue
+        best = max(
+            bucket_frames,
+            key=lambda frame: (
+                compute_risk_score(frame["class_pixel_ratios"]),
+                len(frame.get("predicted_class_ids", [])),
+                frame["frame_idx"],
+            ),
+        )
+        if best["frame_idx"] not in selected_keys:
+            selected.append(best)
+            selected_keys.add(best["frame_idx"])
+
+    if len(selected) < target_frames:
+        remaining = [frame for frame in ordered if frame["frame_idx"] not in selected_keys]
+        remaining = sorted(
+            remaining,
+            key=lambda frame: (
+                compute_risk_score(frame["class_pixel_ratios"]),
+                len(frame.get("predicted_class_ids", [])),
+                -frame["frame_idx"],
+            ),
+            reverse=True,
+        )
+        for frame in remaining:
+            selected.append(frame)
+            selected_keys.add(frame["frame_idx"])
+            if len(selected) >= target_frames:
+                break
+
+    return sorted(selected[:target_frames], key=lambda frame: frame["frame_idx"])
+
+
 def build_dashboard_manifest(
     video_id: str,
     source_video: str,
@@ -545,7 +944,26 @@ def build_dashboard_manifest(
     }
 
     total_visible_pixels = 0
+    binary_mode = any(frame.get("prediction_mode") == "binary_segmentation_with_classification" for frame in frame_summaries)
     for frame in frame_summaries:
+        if binary_mode:
+            score_map = {
+                int(class_id): float(score)
+                for class_id, score in (frame.get("classification_scores") or {}).items()
+            }
+            predicted_ids = [int(class_id) for class_id in frame.get("predicted_class_ids", [])]
+            sign_ids = [class_id for class_id in predicted_ids if class_id not in SIGN_EXCLUDED_CLASS_IDS]
+            if not sign_ids:
+                sign_ids = [int(frame.get("primary_sign_id") or 0)] if int(frame.get("primary_sign_id") or 0) not in SIGN_EXCLUDED_CLASS_IDS else []
+            for class_id in sign_ids:
+                if class_id in WEB_EXCLUDED_CLASS_IDS or class_id not in class_totals:
+                    continue
+                pseudo_pixels = max(1, int(round(score_map.get(class_id, 0.0) * 1000.0)))
+                class_totals[class_id]["pixel_count"] += pseudo_pixels
+                class_totals[class_id]["frames_present"] += 1
+                total_visible_pixels += pseudo_pixels
+            continue
+
         class_counts = frame["class_pixel_counts"]
         frame_visible_pixels = 0
         for class_id, count in class_counts.items():
@@ -585,8 +1003,11 @@ def build_dashboard_manifest(
         top_frames.append(
             {
                 "frame_idx": frame["frame_idx"],
-                "dominant_class_id": frame["dominant_class_id"],
-                "dominant_class_name": frame["dominant_class_name"],
+                "timestamp_sec": frame.get("timestamp_sec"),
+                "dominant_class_id": frame.get("primary_sign_id", frame["dominant_class_id"]),
+                "dominant_class_name": frame.get("primary_sign_name", frame["dominant_class_name"]),
+                "predicted_class_ids": frame.get("predicted_class_ids", []),
+                "class_pixel_ratios": frame["class_pixel_ratios"],
                 "top_classes": sorted_classes[:3],
                 "processed_image": frame["processed_image"],
                 "mask_image": frame["mask_image"],
@@ -600,7 +1021,7 @@ def build_dashboard_manifest(
                 "frame_idx": frame["frame_idx"],
                 "timestamp_sec": frame.get("timestamp_sec"),
                 "risk_score": risk_score,
-                "dominant_class_name": frame["dominant_class_name"],
+                "dominant_class_name": frame.get("primary_sign_name", frame["dominant_class_name"]),
             }
         )
 
@@ -633,7 +1054,7 @@ def build_dashboard_manifest(
         "hdfs_roots": hdfs_roots,
         "class_summaries": sorted(class_totals.values(), key=lambda item: item["pixel_count"], reverse=True),
         "frames": frame_summaries,
-        "top_frames": top_frames,
+        "top_frames": select_story_frames(top_frames, target_frames=6, coverage_buckets=6),
     }
 
     (web_video_root / "manifest.json").write_text(
@@ -659,7 +1080,7 @@ def predict_masks_for_frames(
     web_dirs = prepare_web_output_dirs(web_output_root, video_id)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model_from_checkpoint(model_path, device=device, num_classes=len(CLASS_INFO))
+    loaded_model = load_model_from_checkpoint(model_path, device=device, num_classes=len(CLASS_INFO))
 
     prediction_rows: list[dict] = []
     frame_summaries: list[dict] = []
@@ -693,9 +1114,8 @@ def predict_masks_for_frames(
             continue
 
         started = time.perf_counter()
-        with torch.inference_mode():
-            logits = model(image_to_tensor(image, device))
-            pred_mask = logits.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
+        prediction = predict_with_loaded_model(loaded_model, image_to_tensor(image, device))
+        pred_mask = prediction["pred_mask"]
         inference_wall_seconds += time.perf_counter() - started
         segmented_count += 1
 
@@ -710,11 +1130,12 @@ def predict_masks_for_frames(
         write_hdfs_bytes(spark, mask_path, mask_bytes)
         write_hdfs_bytes(spark, overlay_path, overlay_bytes)
 
-        unique_ids, counts = np.unique(pred_mask, return_counts=True)
-        class_counts = {int(class_id): int(count) for class_id, count in zip(unique_ids, counts)}
-        non_void = {class_id: count for class_id, count in class_counts.items() if class_id != 0}
-        dominant_class_id = max(non_void, key=non_void.get) if non_void else 0
-        predicted_ids = sorted(non_void.keys())
+        class_counts = prediction["class_pixel_counts"]
+        dominant_class_id = int(prediction["dominant_class_id"])
+        predicted_ids = [int(class_id) for class_id in prediction["predicted_class_ids"]]
+        sign_ids = [class_id for class_id in predicted_ids if class_id not in SIGN_EXCLUDED_CLASS_IDS]
+        primary_sign_id = int(sign_ids[0]) if sign_ids else int(dominant_class_id)
+        primary_sign_name = CLASS_NAME_BY_ID[int(primary_sign_id)]
         total_pixels = int(pred_mask.size)
 
         processed_local_path = web_dirs["frames_dir"] / frame_name
@@ -752,13 +1173,14 @@ def predict_masks_for_frames(
                 "timestamp_sec": float(row["frame_idx"] / row["fps"]) if row["fps"] else None,
                 "dominant_class_id": int(dominant_class_id),
                 "dominant_class_name": CLASS_NAME_BY_ID[int(dominant_class_id)],
+                "primary_sign_id": primary_sign_id,
+                "primary_sign_name": primary_sign_name,
                 "predicted_class_ids": predicted_ids,
-                "predicted_class_names": [CLASS_NAME_BY_ID[class_id] for class_id in predicted_ids if class_id not in WEB_EXCLUDED_CLASS_IDS],
+                "predicted_class_names": [CLASS_NAME_BY_ID[class_id] for class_id in sign_ids],
                 "class_pixel_counts": class_counts,
-                "class_pixel_ratios": {
-                    class_id: round(count / total_pixels, 6)
-                    for class_id, count in class_counts.items()
-                },
+                "class_pixel_ratios": prediction["class_pixel_ratios"],
+                "prediction_mode": prediction["prediction_mode"],
+                "classification_scores": prediction["classification_scores"],
                 "processed_image": str(processed_local_path.relative_to(web_dirs["video_root"])).replace("\\", "/"),
                 "mask_image": str(mask_local_path.relative_to(web_dirs["video_root"])).replace("\\", "/"),
                 "overlay_image": str(overlay_local_path.relative_to(web_dirs["video_root"])).replace("\\", "/"),
@@ -790,146 +1212,96 @@ def main() -> None:
     workspace = Path(tempfile.mkdtemp(prefix=f"video-pipeline-{video_id}-"))
     try:
         local_input_video = workspace / video_name
-        local_trimmed_video = workspace / f"{Path(video_name).stem}_trimmed.mp4"
+        local_extracted_dir = workspace / "frames"
 
         extraction_stage_started = time.perf_counter()
         load_video_to_local(spark, args.input_video, local_input_video)
-        trim_info = trim_video(local_input_video, local_trimmed_video, args.trim_start_sec)
-        extracted_rows = extract_frames_to_hdfs(
-            spark=spark,
-            video_path=local_trimmed_video,
+        probe_info = probe_video(local_input_video)
+        crop_px = (
+            int(probe_info["width"] * crop[0]),
+            int(probe_info["height"] * crop[1]),
+            int(probe_info["width"] * crop[2]),
+            int(probe_info["height"] * crop[3]),
+        )
+        effective_trim_start = args.trim_start_sec
+        if probe_info["duration_sec"] and effective_trim_start >= probe_info["duration_sec"]:
+            effective_trim_start = 0
+
+        try:
+            local_frame_paths = extract_frames_with_ffmpeg(
+                input_path=local_input_video,
+                output_dir=local_extracted_dir,
+                start_sec=effective_trim_start,
+                fps=probe_info["fps"],
+                every_n_frames=args.extract_every_n_frames,
+                max_frames=args.max_frames,
+                crop=crop,
+                target_w=args.target_width,
+                target_h=args.target_height,
+            )
+        except RuntimeError as exc:
+            if "did not produce any frames" not in str(exc) or effective_trim_start <= 0:
+                raise
+            # Short videos can legitimately end before the configured trim point.
+            # In that case we safely retry from the start instead of failing the whole run.
+            effective_trim_start = 0
+            local_frame_paths = extract_frames_with_ffmpeg(
+                input_path=local_input_video,
+                output_dir=local_extracted_dir,
+                start_sec=effective_trim_start,
+                fps=probe_info["fps"],
+                every_n_frames=args.extract_every_n_frames,
+                max_frames=args.max_frames,
+                crop=crop,
+                target_w=args.target_width,
+                target_h=args.target_height,
+            )
+        extracted_rows = build_extracted_frame_rows(
+            local_frame_paths=local_frame_paths,
             output_root=staging_video_root,
-            fps=trim_info["fps"],
+            video_id=video_id,
+            fps=probe_info["fps"],
             every_n_frames=args.extract_every_n_frames,
-            max_frames=args.max_frames,
         )
         extraction_wall_seconds = time.perf_counter() - extraction_stage_started
 
-        extracted_df = spark.createDataFrame(extracted_rows)
-        extracted_df = extracted_df.withColumn("source_video", F.lit(args.input_video))
-        extracted_df.write.mode("overwrite").partitionBy("video_id").parquet(CURATED_EXTRACTED_ROOT)
+        if args.write_curated:
+            extracted_df = spark.createDataFrame(extracted_rows)
+            extracted_df = extracted_df.withColumn("source_video", F.lit(args.input_video))
+            extracted_df.write.mode("overwrite").partitionBy("video_id").parquet(CURATED_EXTRACTED_ROOT)
 
         preprocessing_stage_started = time.perf_counter()
-        frame_binary_df = (
-            spark.read.format("binaryFile").load(f"{staging_video_root}/*.jpg")
-            .withColumn("frame_idx", F.regexp_extract("path", r"frame_(\d+)\.jpg", 1).cast("long"))
-            .withColumn("video_id", F.lit(video_id))
-            .withColumn("source_video", F.lit(args.input_video))
-            .withColumn("fps", F.lit(trim_info["fps"]))
-            .withColumn("timestamp_sec", F.col("frame_idx") / F.lit(trim_info["fps"]) if trim_info["fps"] else F.lit(None))
+        processed_rows, processing_summary = prepare_frames_locally(
+            local_frame_paths=local_frame_paths,
+            extracted_rows=extracted_rows,
+            processed_frames_root=processed_frames_root,
+            video_id=video_id,
+            source_video=args.input_video,
+            fps=probe_info["fps"],
+            min_laplacian_var=args.min_laplacian_var,
+            min_brightness=args.min_brightness,
+            max_brightness=args.max_brightness,
+            hamming_threshold=args.hamming_threshold,
+            crop_px=crop_px,
+            target_analysis_frames=args.target_analysis_frames,
+            coverage_buckets=args.coverage_buckets,
+            frames_per_bucket=args.frames_per_bucket,
         )
-
-        metrics_df = (
-            frame_binary_df.withColumn("metrics", metrics_udf()("content"))
-            .select(
-                "video_id",
-                "source_video",
-                "fps",
-                "path",
-                "frame_idx",
-                "timestamp_sec",
-                "content",
-                F.col("metrics.brightness").alias("brightness"),
-                F.col("metrics.laplacian_var").alias("laplacian_var"),
-                F.col("metrics.dhash").alias("dhash"),
-                F.col("metrics.width").alias("width"),
-                F.col("metrics.height").alias("height"),
+        fallback_mode = processing_summary["fallback_mode"]
+        upload_selected_staging_frames(spark, processed_rows, staging_video_root)
+        upload_processed_frames(spark, processed_rows, processed_frames_root)
+        if args.write_curated:
+            processed_ok_df = spark.createDataFrame(
+                [{k: v for k, v in row.items() if k != "processed_content"} for row in processed_rows],
+                schema=processed_frame_schema(),
             )
-        )
-
-        quality_df = (
-            metrics_df.withColumn(
-                "quality_ok",
-                (
-                    F.col("brightness").between(args.min_brightness, args.max_brightness)
-                    & (F.col("laplacian_var") >= F.lit(args.min_laplacian_var))
-                    & F.col("dhash").isNotNull()
-                ),
-            )
-        )
-
-        window = Window.partitionBy("video_id").orderBy("frame_idx")
-        quality_ok_df = quality_df.filter(F.col("quality_ok") == True).cache()
-
-        dedup_df = (
-            quality_ok_df
-            .withColumn("prev_dhash", F.lag("dhash").over(window))
-            .withColumn("hamming_to_prev", hamming_udf()("dhash", "prev_dhash"))
-            .withColumn(
-                "is_duplicate",
-                F.when(F.col("prev_dhash").isNull(), F.lit(False))
-                .when(F.col("hamming_to_prev") <= F.lit(args.hamming_threshold), F.lit(True))
-                .otherwise(F.lit(False)),
-            )
-        )
-
-        clean_df = dedup_df.filter(F.col("is_duplicate") == False)
-
-        fallback_mode = "normal"
-        processing_source_df = clean_df
-        if clean_df.limit(1).count() == 0:
-            fallback_mode = "raw_extracted"
-            processing_source_df = (
-                metrics_df.filter(F.col("dhash").isNotNull())
-                .orderBy("frame_idx")
-                .limit(min(max(len(extracted_rows), 1), 36))
-                .withColumn("quality_ok", F.lit(True))
-                .withColumn("prev_dhash", F.lit(None).cast("string"))
-                .withColumn("hamming_to_prev", F.lit(None).cast("int"))
-                .withColumn("is_duplicate", F.lit(False))
-            )
-
-        processed_df = (
-            processing_source_df.withColumn("processed", preprocess_udf(crop, args.target_width, args.target_height)("content"))
-            .select(
-                "video_id",
-                "source_video",
-                "fps",
-                F.col("path").alias("raw_frame_path"),
-                "frame_idx",
-                "timestamp_sec",
-                "width",
-                "height",
-                "brightness",
-                "laplacian_var",
-                "dhash",
-                "quality_ok",
-                "prev_dhash",
-                "hamming_to_prev",
-                "is_duplicate",
-                F.concat(F.lit(f"{processed_frames_root}/"), F.regexp_extract("path", r"([^/]+)$", 1)).alias("processed_frame_path"),
-                F.col("processed.processed_content").alias("processed_content"),
-                F.col("processed.crop_x1").alias("crop_x1"),
-                F.col("processed.crop_y1").alias("crop_y1"),
-                F.col("processed.crop_x2").alias("crop_x2"),
-                F.col("processed.crop_y2").alias("crop_y2"),
-                F.col("processed.processed_width").alias("processed_width"),
-                F.col("processed.processed_height").alias("processed_height"),
-                F.col("processed.norm_min").alias("norm_min"),
-                F.col("processed.norm_max").alias("norm_max"),
-                F.col("processed.norm_mean").alias("norm_mean"),
-                F.col("processed.status").alias("status"),
-                F.col("processed.error").alias("error"),
-            )
-        )
-
-        processed_ok_df = processed_df.filter(F.col("status") == "ok").cache()
-        upload_processed_frames(spark, processed_ok_df.select("processed_frame_path", "processed_content").toLocalIterator(), processed_frames_root)
-
-        processed_ok_df.drop("processed_content").write.mode("overwrite").partitionBy("video_id").parquet(CURATED_PROCESSED_ROOT)
+            processed_ok_df.write.mode("overwrite").partitionBy("video_id").parquet(CURATED_PROCESSED_ROOT)
         preprocessing_wall_seconds = time.perf_counter() - preprocessing_stage_started
 
         export_stage_started = time.perf_counter()
         segmentation_rows, frame_summaries, timing_stats = predict_masks_for_frames(
             spark=spark,
-            rows=processed_ok_df.select(
-                "video_id",
-                "source_video",
-                "fps",
-                "frame_idx",
-                "processed_frame_path",
-                "processed_content",
-            ).toLocalIterator(),
+            rows=processed_rows,
             model_path=args.model_path,
             masks_root=masks_root,
             overlays_root=overlays_root,
@@ -937,26 +1309,29 @@ def main() -> None:
             web_output_root=args.web_output_root,
             video_id=video_id,
         )
-        segmentation_df = spark.createDataFrame(segmentation_rows, schema=segmentation_schema())
-        segmentation_df.write.mode("overwrite").partitionBy("video_id").parquet(CURATED_SEGMENTATIONS_ROOT)
+        if args.write_curated:
+            segmentation_df = spark.createDataFrame(segmentation_rows, schema=segmentation_schema())
+            segmentation_df.write.mode("overwrite").partitionBy("video_id").parquet(CURATED_SEGMENTATIONS_ROOT)
         export_stage_wall_seconds = time.perf_counter() - export_stage_started
 
-        quality_ok_frames = quality_ok_df.count()
-        deduplicated_frames = clean_df.count()
-        processed_frames = processed_ok_df.count()
-        segmented_frames = segmentation_df.filter(F.col("status") == "ok").count()
+        quality_ok_frames = processing_summary["quality_ok_frames"]
+        deduplicated_frames = processing_summary["deduplicated_frames"]
+        candidate_processed_frames = processing_summary["candidate_processed_frames"]
+        processed_frames = processing_summary["processed_frames"]
+        segmented_frames = sum(1 for row in segmentation_rows if row.get("status") == "ok")
         pipeline_wall_seconds = round(time.perf_counter() - pipeline_started, 4)
 
         run_summary_payload = {
             "video_id": video_id,
             "source_video": args.input_video,
-            "trim_start_sec": args.trim_start_sec,
+            "trim_start_sec": effective_trim_start,
             "extract_every_n_frames": args.extract_every_n_frames,
-            "fps": trim_info["fps"],
-            "trimmed_frames": trim_info["trimmed_frames"],
+            "fps": probe_info["fps"],
+            "trimmed_frames": max(int(probe_info["source_total_frames"] - round(effective_trim_start * probe_info["fps"])), 0) if probe_info["fps"] else 0,
             "extracted_frames": len(extracted_rows),
             "quality_ok_frames": quality_ok_frames,
             "deduplicated_frames": deduplicated_frames,
+            "candidate_processed_frames": candidate_processed_frames,
             "processed_frames": processed_frames,
             "fallback_mode": fallback_mode,
             "staging_frames_root": staging_video_root,
@@ -972,8 +1347,9 @@ def main() -> None:
             "export_stage_wall_seconds": round(export_stage_wall_seconds, 4),
             "pipeline_wall_seconds": pipeline_wall_seconds,
         }
-        run_summary = spark.createDataFrame([run_summary_payload])
-        run_summary.write.mode("overwrite").parquet(f"{CURATED_RUNS_ROOT}/{video_id}")
+        if args.write_curated:
+            run_summary = spark.createDataFrame([run_summary_payload])
+            run_summary.write.mode("overwrite").parquet(f"{CURATED_RUNS_ROOT}/{video_id}")
 
         build_dashboard_manifest(
             video_id=video_id,
@@ -981,10 +1357,11 @@ def main() -> None:
             web_video_root=Path(args.web_output_root) / video_id,
             frame_summaries=frame_summaries,
             run_counts={
-                "trimmed_frames": trim_info["trimmed_frames"],
+                "trimmed_frames": max(int(probe_info["source_total_frames"] - round(args.trim_start_sec * probe_info["fps"])), 0) if probe_info["fps"] else 0,
                 "extracted_frames": len(extracted_rows),
                 "quality_ok_frames": quality_ok_frames,
                 "deduplicated_frames": deduplicated_frames,
+                "candidate_processed_frames": candidate_processed_frames,
                 "processed_frames": processed_frames,
                 "segmented_frames": segmented_frames,
                 "fallback_mode": fallback_mode,

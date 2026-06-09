@@ -5,9 +5,9 @@ Project overview
 - `spark/Dockerfile` builds the shared Spark runtime with OpenCV and Python dependencies.
 - `nifi/Dockerfile` builds the NiFi image with Spark client tools and the same video-processing dependencies.
 - `spark/apps/video_pipeline.py` runs the video pipeline on top of HDFS and Spark.
-- `spark/apps/segmentation_model.py` restores the trained 11-class segmentation model from `best_model.pth`.
+- `spark/apps/segmentation_model.py` restores the trained segmentation and classification model from `Model_best.pt`.
 - `run_video_pipeline.py` uploads a local video to HDFS and starts the Spark pipeline inside Docker.
-- `ml-service/models/best_model.pth` stores the trained corrosion segmentation model used after frame preprocessing.
+- `ml-service/models/Model_best.pt` stores the trained corrosion, paint peel, and marine growth model used after frame preprocessing.
 - `hive/create_video_tables.sql` creates Hive external tables over the curated parquet datasets.
 
 Target architecture
@@ -73,7 +73,7 @@ The launcher will:
 - upload the local video into `hdfs://namenode:8020/data/raw/videos/...`
 - run `spark-submit` inside the `nifi` container
 - write outputs to `staging`, `processed` and `curated`
-- load `ml-service/models/best_model.pth`
+- load `ml-service/models/Model_best.pt`
 - generate masks and overlay images for each processed frame
 
 NiFi mode

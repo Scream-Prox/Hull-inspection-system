@@ -16,4 +16,4 @@ RUN chmod +x /app/entrypoint.sh
 EXPOSE 8501
 EXPOSE 8502
 
-CMD ["/app/entrypoint.sh"]
+CMD ["/bin/sh", "/app/entrypoint.sh"]

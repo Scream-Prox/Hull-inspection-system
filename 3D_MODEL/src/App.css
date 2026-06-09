@@ -32,6 +32,7 @@ body {
   left: 18px;
   z-index: 20;
   display: flex;
+  flex-wrap: wrap;
   gap: 14px;
   align-items: center;
   background: rgba(255, 255, 255, 0.9);
@@ -54,6 +55,11 @@ body {
 
 .toolbar-button:hover {
   filter: brightness(0.98);
+}
+
+.toolbar-button--secondary {
+  background: #fff;
+  border: 1px solid #c5d4e4;
 }
 
 .toolbar-meta {
@@ -115,6 +121,23 @@ canvas {
   border-radius: 10px;
   cursor: pointer;
   font-weight: 600;
+}
+
+@media (max-width: 760px) {
+  .model-toolbar {
+    right: 12px;
+    top: 12px;
+    left: 12px;
+  }
+
+  .toolbar-button {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+
+  .photo-sidebar {
+    width: 100vw;
+  }
 }
 
 .photo-sidebar__list {

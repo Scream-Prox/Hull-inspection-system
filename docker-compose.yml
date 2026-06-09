@@ -6,9 +6,15 @@ services:
     environment:
       - CLUSTER_NAME=diploma-cluster
       - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_namenode_safemode_threshold___pct=0.90
+      - HDFS_CONF_dfs_namenode_safemode_min_datanodes=1
+      - HDFS_CONF_dfs_namenode_safemode_extension=0
     ports:
       - "9870:9870"
       - "8020:8020"
+    mem_limit: 768m
+    cpus: 0.75
     volumes:
       - namenode_data:/hadoop/dfs/name
 
@@ -21,10 +27,28 @@ services:
       - SERVICE_PRECONDITION=namenode:9870
     ports:
       - "9864:9864"
+    mem_limit: 768m
+    cpus: 0.75
     volumes:
       - datanode_data:/hadoop/dfs/data
     depends_on:
       - namenode
+
+  hdfs-bootstrap:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs-bootstrap
+    hostname: hdfs-bootstrap
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - HADOOP_CONF_DIR=/opt/hadoop-config
+    command: ["/bin/bash", "/opt/hadoop-config/bootstrap-hdfs.sh"]
+    mem_limit: 256m
+    cpus: 0.25
+    volumes:
+      - ./hadoop-config:/opt/hadoop-config:ro
+    depends_on:
+      - namenode
+      - datanode
 
   spark-master:
     build:
@@ -37,6 +61,8 @@ services:
     ports:
       - "8080:8080"
       - "7077:7077"
+    mem_limit: 1g
+    cpus: 0.75
     volumes:
       - ./spark/apps:/opt/spark-apps
       - ./ml-service/models:/opt/models
@@ -50,6 +76,8 @@ services:
       - spark-master
     ports:
       - "8081:8081"
+    mem_limit: 2g
+    cpus: 1.5
     volumes:
       - ./spark/apps:/opt/spark-apps
       - ./ml-service/models:/opt/models
@@ -67,6 +95,8 @@ services:
       - ./hive/create_video_tables.sql:/opt/hive/create_video_tables.sql
       - hive_data:/opt/hive/data
     entrypoint: ["tail", "-f", "/dev/null"]
+    mem_limit: 256m
+    cpus: 0.25
     depends_on:
       - namenode
 
@@ -84,7 +114,16 @@ services:
       - HADOOP_CONF_DIR=/opt/hadoop-config
       - SPARK_HOME=/opt/spark
       - JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+      - NIFI_JVM_HEAP_INIT=768m
+      - NIFI_JVM_HEAP_MAX=2048m
+      - OMP_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - NUMEXPR_NUM_THREADS=2
+      - TORCH_NUM_THREADS=2
       - PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:/opt/spark/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    mem_limit: 4g
+    cpus: 2.25
     volumes:
       - ./nifi/input:/opt/nifi/nifi-current/input
       - ./hadoop-config:/opt/hadoop-config
@@ -100,6 +139,7 @@ services:
     depends_on:
       - namenode
       - spark-master
+      - hdfs-bootstrap
 
   streamlit-web:
     build:
@@ -117,9 +157,39 @@ services:
       - MODEL_SERVER_PORT=8502
       - MODEL_SERVER_URL=http://localhost:8502
       - MODEL_DIST_DIR=/opt/3d-model
+      - GRAFANA_EMBED_URL=${GRAFANA_EMBED_URL:-http://localhost:3000/d/hull-inspection/hull-inspection?orgId=1&kiosk&theme=dark&from=now-30d&to=now&var-kind={kind}}
+      - GRAFANA_TITLE=${GRAFANA_TITLE:-Grafana Dashboard}
+      - GRAFANA_DB_PATH=/opt/web-data/results/_grafana/inspection_metrics.db
+    mem_limit: 768m
+    cpus: 0.75
     volumes:
       - ./webapp/results:/opt/web-data/results
       - ./3D_MODEL/dist:/opt/3d-model:ro
+    depends_on:
+      - nifi
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    hostname: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=adminadminadmin
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_INSTALL_PLUGINS=frser-sqlite-datasource
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/hull_inspection.json
+    mem_limit: 512m
+    cpus: 0.5
+    volumes:
+      - ./webapp/results:/opt/web-data/results:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_storage:/var/lib/grafana
     depends_on:
       - nifi
 
@@ -133,3 +203,4 @@ volumes:
   nifi_content_repository:
   nifi_provenance_repository:
   nifi_state:
+  grafana_storage:
